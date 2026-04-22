@@ -110,7 +110,8 @@ def cmd_today(args: argparse.Namespace) -> int:
     assert pick.card is not None
 
     _print_card(pick.card, pick.kind)
-    prompt = f"  {_color('Did you solve it?', BOLD)} [y/n/skip] > "
+    print(f"  {DIM}y = solved · n = couldn't solve · e = trivially easy · skip{RESET}")
+    prompt = f"  {_color('Answer', BOLD)} [y/n/e/skip] > "
     try:
         answer = input(prompt).strip().lower()
     except (EOFError, KeyboardInterrupt):
@@ -122,15 +123,15 @@ def cmd_today(args: argparse.Namespace) -> int:
         db.postpone(conn, pick.card, next_due)
         print(f"  {_color('Postponed', DIM)} to {next_due.isoformat()}.\n")
         return 0
-    if answer not in ("y", "n"):
-        print("  Expected y / n / skip. No changes made.")
+    if answer not in ("y", "n", "e"):
+        print("  Expected y / n / e / skip. No changes made.")
         return 2
 
     result = schedule(pick.card.state, answer, today)
     db.apply_review(conn, pick.card, answer, result.state, result.next_due, today)
 
-    verb = "solved" if answer == "y" else "failed"
-    color = GREEN if answer == "y" else RED
+    verb = {"y": "solved", "n": "failed", "e": "easy"}[answer]
+    color = {"y": GREEN, "n": RED, "e": CYAN}[answer]
     days = result.state.interval_days
     print()
     print(f"  {_color(verb, color)} — next review in {days} day{'s' if days != 1 else ''} "
@@ -148,7 +149,12 @@ def cmd_history(args: argparse.Namespace) -> int:
         return 0
     print()
     for r in rows:
-        icon = {"y": _color("✓", GREEN), "n": _color("✗", RED), "skip": _color("⋯", DIM)}[r["outcome"]]
+        icon = {
+            "y": _color("✓", GREEN),
+            "n": _color("✗", RED),
+            "e": _color("★", CYAN),
+            "skip": _color("⋯", DIM),
+        }[r["outcome"]]
         diff = _color(r["difficulty"], DIFFICULTY_COLOR.get(r["difficulty"], ""))
         when = r["reviewed_at"][:16].replace("T", " ")
         delta = (

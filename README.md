@@ -9,8 +9,9 @@ New cards go Easy → Medium → Hard so muscle memory builds up gradually.
   Two Sum  [Easy]  Arrays & Hashing
   https://leetcode.com/problems/two-sum/
 
-  Did you solve it? [y/n/skip] > y
-  solved — next review in 1 day (2026-04-23).
+  y = solved · n = couldn't solve · e = trivially easy · skip
+  Answer [y/n/e/skip] > y
+  solved — next review in 4 days (2026-04-26).
 ```
 
 ## Install
@@ -57,13 +58,17 @@ tell you you're done.
 
 ## Scheduling rules
 
-SM-2 (Anki's default), lightly tuned:
+Three grades, SM-2 under the hood:
 
-- **1st correct (`y`)**: next review in 1 day.
-- **2nd correct**: next review in 6 days.
-- **Nth correct**: `round(interval × ease)`. Ease grows by 0.05 per correct (cap 2.8).
-- **Wrong (`n`)**: streak resets, card pushed out **at least 3 days** — not tomorrow.
-  The brain needs time to forget and re-encounter cleanly. Ease drops by 0.2 (floor 1.3).
+- **`y` — solved it.**
+  - First time on a fresh card: interval jumps to **4 days** (no 1-day probe — a first-shot pass is strong evidence, and each LeetCode review costs real time).
+  - After that: `round(interval × ease)`. Ease grows by 0.05 per correct (cap 2.8).
+- **`e` — trivially easy.**
+  - First time on a fresh card: interval jumps to **7 days**.
+  - After that: `round(interval × ease × 1.3)` — the Anki "easy bonus". Ease grows by 0.15.
+- **`n` — couldn't solve.**
+  - Streak resets, card pushed out **at least 3 days** — not tomorrow. The brain needs time to forget and re-encounter cleanly.
+  - Ease drops by 0.2 (floor 1.3).
 
 New cards are introduced in order **Easy (60) → Medium (155) → Hard (35)** within the
 NeetCode list ordering. Due reviews always beat new cards when both are available.

@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS reviews (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     card_id TEXT NOT NULL REFERENCES cards(id),
     reviewed_at TEXT NOT NULL,
-    outcome TEXT NOT NULL CHECK (outcome IN ('y','n','skip')),
+    outcome TEXT NOT NULL CHECK (outcome IN ('y','n','e','skip')),
     interval_before INTEGER NOT NULL,
     interval_after INTEGER NOT NULL,
     ease_before REAL NOT NULL,
