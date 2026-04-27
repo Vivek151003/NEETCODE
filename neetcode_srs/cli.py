@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import shlex
+import shutil
+import subprocess
 import sys
+import webbrowser
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -12,6 +16,7 @@ DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 DB_PATH = DATA_DIR / "state.db"
 CACHE_PATH = DATA_DIR / "neetcode250.json"
 CONFIG_PATH = DATA_DIR / "config.json"
+IMAGES_DIR = DATA_DIR / "images"
 
 
 # --- output helpers -------------------------------------------------------
@@ -49,7 +54,44 @@ def _print_card(card: db.Card, kind: str) -> None:
         streak = card.reps
         prior = card.interval_days
         print(f"  {DIM}streak: {streak} · last interval: {prior}d · ease: {card.ease:.2f}{RESET}")
+        if card.notes:
+            print(f"  {DIM}note: {card.notes}{RESET}")
+        if card.image_path:
+            print(f"  {DIM}image: {card.image_path}{RESET}")
+            _open_file(card.image_path)
     print()
+
+
+def _open_url(url: str) -> None:
+    if sys.platform == "darwin":
+        subprocess.run(["open", url], check=False)
+    elif sys.platform.startswith("win"):
+        subprocess.run(["start", url], shell=True, check=False)
+    else:
+        webbrowser.open(url)
+
+
+def _open_file(path: str) -> None:
+    if sys.platform == "darwin":
+        subprocess.run(["open", path], check=False)
+    elif sys.platform.startswith("win"):
+        subprocess.run(["start", path], shell=True, check=False)
+    else:
+        subprocess.run(["xdg-open", path], check=False)
+
+
+def _save_image(src: str, card_id: str) -> str:
+    """Copy src into IMAGES_DIR and return the absolute path string."""
+    IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        parts = shlex.split(src)
+        src = parts[0] if parts else src
+    except ValueError:
+        pass
+    src_path = Path(src).expanduser().resolve()
+    dest = IMAGES_DIR / f"{card_id}{src_path.suffix}"
+    shutil.copy2(src_path, dest)
+    return str(dest)
 
 
 def _parse_today(raw: str | None) -> date:
@@ -142,7 +184,31 @@ def cmd_today(args: argparse.Namespace) -> int:
     print(f"  {_color(verb, color)} — next review in {days} day{'s' if days != 1 else ''} "
           f"({result.next_due.isoformat()}).")
     print(f"  {DIM}ease {pick.card.ease:.2f} → {result.state.ease:.2f}  ·  "
-          f"streak {result.state.reps}{RESET}\n")
+          f"streak {result.state.reps}{RESET}")
+
+    try:
+        existing = f" ({pick.card.notes})" if pick.card.notes else ""
+        note_input = input(f"  {DIM}Note{existing} (Enter to skip): {RESET}").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return 0
+    if note_input:
+        db.set_note(conn, pick.card.id, note_input)
+
+    try:
+        existing_img = f" (attached)" if pick.card.image_path else ""
+        img_input = input(f"  {DIM}Image path{existing_img} (Enter to skip): {RESET}").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return 0
+    if img_input:
+        try:
+            saved = _save_image(img_input, pick.card.id)
+            db.set_image(conn, pick.card.id, saved)
+            print(f"  {DIM}Image saved.{RESET}")
+        except (FileNotFoundError, OSError) as e:
+            print(f"  {_color('Could not save image', RED)}: {e}")
+    print()
     return 0
 
 
@@ -233,6 +299,63 @@ def cmd_skip(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_open(args: argparse.Namespace) -> int:
+    conn = db.connect(DB_PATH)
+    today = _parse_today(args.today)
+    cfg = config.load(CONFIG_PATH)
+    pick = selector.pick_today(conn, today, daily_target=cfg["daily_target"])
+    if pick.kind == "empty":
+        print("Deck is empty. Run `neetcode setup` first.")
+        return 1
+    if pick.kind == "quota_hit":
+        print("\n  Done for today. No card to open.\n")
+        return 0
+    assert pick.card is not None
+    _print_card(pick.card, pick.kind)
+    _open_url(pick.card.leetcode_url)
+    print(f"  {DIM}Opened in browser.{RESET}\n")
+    return 0
+
+
+def cmd_note(args: argparse.Namespace) -> int:
+    conn = db.connect(DB_PATH)
+    today = _parse_today(args.today)
+    card = db.last_reviewed_today(conn, today)
+    if card is None:
+        print("\n  No card reviewed today. Run `neetcode` first.\n")
+        return 1
+    diff = _color(card.difficulty, DIFFICULTY_COLOR.get(card.difficulty, ""))
+    print(f"\n  {_color(card.title, BOLD)}  [{diff}]")
+    if card.notes:
+        print(f"  {DIM}Current note: {card.notes}{RESET}")
+    if card.image_path:
+        print(f"  {DIM}Current image: {card.image_path}{RESET}")
+    try:
+        text = input(f"  {_color('Note', BOLD)} (Enter to keep): ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return 0
+    if text:
+        db.set_note(conn, card.id, text)
+        print(f"  {DIM}Saved.{RESET}")
+
+    try:
+        existing_img = " (Enter to keep)" if card.image_path else " (Enter to skip)"
+        img_input = input(f"  {_color('Image path', BOLD)}{existing_img}: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return 0
+    if img_input:
+        try:
+            saved = _save_image(img_input, card.id)
+            db.set_image(conn, card.id, saved)
+            print(f"  {DIM}Image saved.{RESET}")
+        except (FileNotFoundError, OSError) as e:
+            print(f"  {_color('Could not save image', RED)}: {e}")
+    print()
+    return 0
+
+
 # --- entrypoint -----------------------------------------------------------
 
 def build_parser() -> argparse.ArgumentParser:
@@ -265,6 +388,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_skip = sub.add_parser("skip", parents=[common], help="Postpone today's card by one day.")
     p_skip.set_defaults(func=cmd_skip)
+
+    p_open = sub.add_parser("open", parents=[common], help="Open today's card in the browser.")
+    p_open.set_defaults(func=cmd_open)
+
+    p_note = sub.add_parser("note", parents=[common],
+                            help="View or edit the note for today's reviewed card.")
+    p_note.set_defaults(func=cmd_note)
 
     p_dash = sub.add_parser("dashboard", parents=[common],
                             help="Open a local HTML progress dashboard in your browser.")
