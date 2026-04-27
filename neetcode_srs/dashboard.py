@@ -7,6 +7,7 @@ recent-reviews log. Opens it in the default browser.
 """
 from __future__ import annotations
 
+import base64
 import html as _html
 import json
 import sqlite3
@@ -69,6 +70,7 @@ def build_data(conn: sqlite3.Connection, today: date) -> dict:
     attempted = s["total"] - s["new"]
 
     recent = db.recent_reviews(conn, limit=25)
+    noted = db.cards_with_notes(conn)
 
     # Most-recent review datetime (for subhead).
     last_row = conn.execute(
@@ -106,6 +108,7 @@ def build_data(conn: sqlite3.Connection, today: date) -> dict:
         "submissions_past_year": submissions_past_year,
         "active_days_past_year": active_days_past_year,
         "max_streak_past_year": max_streak_past_year,
+        "noted": noted,
     }
 
 
@@ -877,6 +880,115 @@ h1.display em {
   border-radius: 12px;
 }
 
+/* ---------- inline note / thumbnail in log rows ---------- */
+
+.row-note {
+  font-size: 12px;
+  color: var(--ink);
+  font-style: italic;
+  margin-top: 4px;
+  padding: 6px 10px;
+  background: rgba(249, 115, 22, 0.06);
+  border-left: 2px solid rgba(249, 115, 22, 0.4);
+  border-radius: 0 6px 6px 0;
+}
+
+.row-thumb {
+  margin-top: 8px;
+  max-width: 120px;
+  max-height: 80px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  cursor: zoom-in;
+  object-fit: cover;
+  transition: max-width 0.3s ease, max-height 0.3s ease, border-color 0.2s ease;
+  display: block;
+}
+.row-thumb.expanded {
+  max-width: 100%;
+  max-height: 600px;
+  cursor: zoom-out;
+  border-color: var(--border-light);
+}
+
+/* ---------- problem notes card ---------- */
+
+.notes-card {
+  grid-column: span 12;
+}
+
+.notes-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 16px;
+}
+
+.note-item {
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  transition: border-color 0.25s ease, background 0.25s ease;
+}
+.note-item:hover {
+  border-color: var(--border-light);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.note-item-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.note-item-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink-strong);
+  line-height: 1.3;
+}
+
+.note-item-diff {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 100px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.note-item-diff[data-diff="Easy"]   { color: var(--sage);  background: rgba(16,185,129,0.1);  border: 1px solid rgba(16,185,129,0.2); }
+.note-item-diff[data-diff="Medium"] { color: var(--amber); background: rgba(245,158,11,0.1);  border: 1px solid rgba(245,158,11,0.2); }
+.note-item-diff[data-diff="Hard"]   { color: var(--terra); background: rgba(239,68,68,0.1);   border: 1px solid rgba(239,68,68,0.2); }
+
+.note-item-text {
+  font-size: 13px;
+  color: var(--ink);
+  line-height: 1.6;
+  padding: 10px 12px;
+  background: rgba(249, 115, 22, 0.05);
+  border-left: 2px solid rgba(249, 115, 22, 0.35);
+  border-radius: 0 8px 8px 0;
+}
+
+.note-item-img {
+  width: 100%;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  cursor: zoom-in;
+  object-fit: contain;
+  max-height: 180px;
+  transition: max-height 0.35s ease, border-color 0.2s ease;
+}
+.note-item-img.expanded {
+  max-height: 600px;
+  cursor: zoom-out;
+  border-color: var(--border-light);
+}
+
 /* ---------- ending ---------- */
 
 footer.colophon {
@@ -948,6 +1060,18 @@ _GRAIN_SVG = (
 
 _MARK = {"y": "✓", "e": "★", "n": "✗", "skip": "—"}
 
+_IMG_MIME = {"jpg": "jpeg", "jpeg": "jpeg", "png": "png", "gif": "gif", "webp": "webp"}
+
+
+def _img_data_uri(path: str) -> str | None:
+    try:
+        data = Path(path).read_bytes()
+        ext = Path(path).suffix.lower().lstrip(".")
+        mime = _IMG_MIME.get(ext, "png")
+        return f"data:image/{mime};base64,{base64.b64encode(data).decode()}"
+    except (FileNotFoundError, OSError):
+        return None
+
 
 def _fmt_recent_row(r: dict) -> str:
     outcome = r["outcome"]
@@ -957,6 +1081,21 @@ def _fmt_recent_row(r: dict) -> str:
         interval_txt = "postponed"
     else:
         interval_txt = f"{r['interval_before']}d → {r['interval_after']}d"
+
+    note_html = ""
+    if r.get("notes"):
+        note_html = f'<div class="row-note">{_html.escape(r["notes"])}</div>'
+
+    thumb_html = ""
+    if r.get("image_path"):
+        uri = _img_data_uri(r["image_path"])
+        if uri:
+            thumb_html = (
+                f'<img class="row-thumb" src="{uri}" '
+                f'alt="note image" title="Click to expand" '
+                f'onclick="this.classList.toggle(\'expanded\')">'
+            )
+
     return (
         f'<li class="outcome-{outcome}">'
         f'<div class="mark">{mark}</div>'
@@ -966,6 +1105,8 @@ def _fmt_recent_row(r: dict) -> str:
         f'<span class="diff-tag" data-diff="{r["difficulty"]}">{r["difficulty"]}</span>'
         f'<span class="interval">{interval_txt}</span>'
         f'</div>'
+        f'{note_html}'
+        f'{thumb_html}'
         f'</div>'
         f'<div class="log-time">{when}</div>'
         f'</li>'
@@ -1095,6 +1236,36 @@ def render_html(data: dict) -> str:
     else:
         recent_html = '<ol class="log"><li class="empty">No entries yet. Open a card — your first mark goes here.</li></ol>'
 
+    # Problem notes card
+    noted = data.get("noted", [])
+    notes_card_html = ""
+    if noted:
+        items = []
+        for card in noted:
+            note_text = f'<div class="note-item-text">{_html.escape(card["notes"])}</div>' if card.get("notes") else ""
+            img_html = ""
+            if card.get("image_path"):
+                uri = _img_data_uri(card["image_path"])
+                if uri:
+                    img_html = f'<img class="note-item-img" src="{uri}" alt="note" onclick="this.classList.toggle(\'expanded\')">'
+            items.append(
+                f'<div class="note-item">'
+                f'<div class="note-item-header">'
+                f'<span class="note-item-title">{_html.escape(card["title"])}</span>'
+                f'<span class="note-item-diff" data-diff="{card["difficulty"]}">{card["difficulty"]}</span>'
+                f'</div>'
+                f'{note_text}{img_html}'
+                f'</div>'
+            )
+        notes_card_html = f'''
+      <div class="card notes-card">
+        <div class="section-head">
+          <h2>Problem Notes</h2>
+          <span class="meta">{len(noted)} annotated</span>
+        </div>
+        <div class="notes-grid">{"".join(items)}</div>
+      </div>'''
+
     submissions_past_year = data["submissions_past_year"]
     active_days_past_year = data["active_days_past_year"]
     max_streak_past_year = data["max_streak_past_year"]
@@ -1175,6 +1346,8 @@ def render_html(data: dict) -> str:
         </div>
         {recent_html}
       </div>
+
+      {notes_card_html}
     </div>
 
     <footer class="colophon">

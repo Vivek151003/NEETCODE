@@ -3,7 +3,9 @@
     "allow": [
       "Bash(python3 -c \"import webbrowser; print\\(webbrowser.get\\(\\).__class__.__name__\\)\")",
       "Bash(python3 *)",
-      "Bash(neetcode open *)"
+      "Bash(neetcode open *)",
+      "Bash(python -c ' *)",
+      "Bash(open /var/folders/7_/0hh3ljt57bj5qrb43259bbgm0000gn/T/neetcode-dashboard.html)"
     ]
   }
 }

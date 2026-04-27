@@ -309,10 +309,23 @@ def last_reviewed_today(conn: sqlite3.Connection, today: date) -> Card | None:
 def recent_reviews(conn: sqlite3.Connection, limit: int = 10) -> list[dict]:
     rows = conn.execute(
         """
-        SELECT r.*, c.title, c.difficulty
+        SELECT r.*, c.title, c.difficulty, c.notes, c.image_path
         FROM reviews r JOIN cards c ON c.id = r.card_id
         ORDER BY r.id DESC LIMIT ?
         """,
         (limit,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def cards_with_notes(conn: sqlite3.Connection) -> list[dict]:
+    rows = conn.execute(
+        """
+        SELECT id, title, difficulty, leetcode_url, notes, image_path
+        FROM cards
+        WHERE (notes IS NOT NULL AND notes != '')
+           OR (image_path IS NOT NULL AND image_path != '')
+        ORDER BY order_idx ASC
+        """
     ).fetchall()
     return [dict(r) for r in rows]
