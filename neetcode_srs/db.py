@@ -20,7 +20,8 @@ CREATE TABLE IF NOT EXISTS cards (
     interval_days INTEGER NOT NULL DEFAULT 0,
     reps INTEGER NOT NULL DEFAULT 0,
     next_due TEXT,
-    last_reviewed TEXT
+    last_reviewed TEXT,
+    notes TEXT
 );
 
 CREATE TABLE IF NOT EXISTS reviews (
@@ -52,10 +53,20 @@ class Card:
     reps: int
     next_due: date | None
     last_reviewed: date | None
+    notes: str | None = None
+    image_path: str | None = None
 
     @property
     def state(self) -> CardState:
         return CardState(ease=self.ease, interval_days=self.interval_days, reps=self.reps)
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(cards)")}
+    if "notes" not in cols:
+        conn.execute("ALTER TABLE cards ADD COLUMN notes TEXT")
+    if "image_path" not in cols:
+        conn.execute("ALTER TABLE cards ADD COLUMN image_path TEXT")
 
 
 def connect(db_path: Path) -> sqlite3.Connection:
@@ -64,6 +75,7 @@ def connect(db_path: Path) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(SCHEMA)
+    _migrate(conn)
     return conn
 
 
@@ -80,6 +92,8 @@ def _row_to_card(row: sqlite3.Row) -> Card:
         reps=row["reps"],
         next_due=date.fromisoformat(row["next_due"]) if row["next_due"] else None,
         last_reviewed=date.fromisoformat(row["last_reviewed"]) if row["last_reviewed"] else None,
+        notes=row["notes"] if row["notes"] else None,
+        image_path=row["image_path"] if row["image_path"] else None,
     )
 
 
@@ -267,6 +281,29 @@ def stats(conn: sqlite3.Connection, today: date) -> dict:
         "due_today": due_today,
         "by_difficulty": by_difficulty,
     }
+
+
+def set_note(conn: sqlite3.Connection, card_id: str, text: str) -> None:
+    with conn:
+        conn.execute("UPDATE cards SET notes = ? WHERE id = ?", (text or None, card_id))
+
+
+def set_image(conn: sqlite3.Connection, card_id: str, path: str | None) -> None:
+    with conn:
+        conn.execute("UPDATE cards SET image_path = ? WHERE id = ?", (path or None, card_id))
+
+
+def last_reviewed_today(conn: sqlite3.Connection, today: date) -> Card | None:
+    row = conn.execute(
+        """
+        SELECT c.* FROM cards c
+        JOIN reviews r ON r.card_id = c.id
+        WHERE date(r.reviewed_at) = ? AND r.outcome IN ('y','n','e')
+        ORDER BY r.id DESC LIMIT 1
+        """,
+        (today.isoformat(),),
+    ).fetchone()
+    return _row_to_card(row) if row else None
 
 
 def recent_reviews(conn: sqlite3.Connection, limit: int = 10) -> list[dict]:

@@ -76,6 +76,21 @@ def build_data(conn: sqlite3.Connection, today: date) -> dict:
     ).fetchone()
     last_reviewed_at = last_row["reviewed_at"] if last_row else None
 
+    # Stats shown in the heatmap header (past-year window only)
+    submissions_past_year = sum(d["graded"] for d in days.values())
+    active_days_past_year = sum(1 for d in days.values() if d["graded"] > 0)
+    max_streak_past_year = 0
+    _run = 0
+    _cur = window_start
+    while _cur <= today:
+        if days.get(_cur.isoformat(), {}).get("graded", 0) > 0:
+            _run += 1
+            if _run > max_streak_past_year:
+                max_streak_past_year = _run
+        else:
+            _run = 0
+        _cur += timedelta(days=1)
+
     return {
         "today": today,
         "attempted": attempted,
@@ -88,13 +103,16 @@ def build_data(conn: sqlite3.Connection, today: date) -> dict:
         "recent": recent,
         "last_reviewed_at": last_reviewed_at,
         "counts": {"y": total_y, "n": total_n, "e": total_e},
+        "submissions_past_year": submissions_past_year,
+        "active_days_past_year": active_days_past_year,
+        "max_streak_past_year": max_streak_past_year,
     }
 
 
 # --- heatmap grid ---------------------------------------------------------
 
-_MONTHS = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN",
-           "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"]
+_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+           "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 
 
 def _level_for_count(count: int) -> int:
@@ -110,22 +128,34 @@ def _level_for_count(count: int) -> int:
 
 
 def _build_heatmap(today: date, days: dict) -> dict:
-    # 53 columns × 7 rows, Sunday at top. Anchor the first column to the
-    # Sunday on/before (today - 52 weeks).
+    # Columns × 7 rows, Sunday at top. Anchor the first column to the
+    # Sunday on/before (today - 52 weeks), and extend the grid to the end of
+    # next month so "next month" always appears as the rightmost label.
     target_start = today - timedelta(days=52 * 7)
     offset = (target_start.weekday() + 1) % 7  # Mon=0 → 1, Sun=6 → 0
     grid_start = target_start - timedelta(days=offset)
 
+    next_month_num = today.month % 12 + 1
+    next_month_year = today.year + (1 if today.month == 12 else 0)
+    next_month_first = date(next_month_year, next_month_num, 1)
+    # Extend to the first Sunday of next month so the month label appears once,
+    # with only one week of future cells after it.
+    days_to_sunday = (6 - next_month_first.weekday()) % 7
+    first_sunday_next = next_month_first + timedelta(days=days_to_sunday)
+    num_cols = (first_sunday_next - grid_start).days // 7 + 1
+
     cells_html: list[str] = []
-    month_labels: list[tuple[int, str]] = []  # (col_index, label)
+    # Track month ranges so labels can be centered under their full column span.
+    month_ranges: list[tuple[int, int, str]] = []  # (start_col, end_col, label)
+    month_col_start = 0
     last_month_seen = None
 
-    for col in range(53):
+    for col in range(num_cols):
         col_start = grid_start + timedelta(days=col * 7)
-        # Month label is placed on the column where a new month starts
-        # within that week's top row (Sunday). Use the Sunday date.
-        if col_start.month != last_month_seen and col_start <= today:
-            month_labels.append((col, _MONTHS[col_start.month - 1]))
+        if col_start.month != last_month_seen:
+            if last_month_seen is not None:
+                month_ranges.append((month_col_start, col - 1, _MONTHS[last_month_seen - 1]))
+            month_col_start = col
             last_month_seen = col_start.month
 
         for row in range(7):
@@ -147,15 +177,20 @@ def _build_heatmap(today: date, days: dict) -> dict:
                 f'animation-delay:{col * 8}ms"></div>'
             )
 
+    if last_month_seen is not None:
+        month_ranges.append((month_col_start, num_cols - 1, _MONTHS[last_month_seen - 1]))
+
+    # grid-column: start_line / end_line (1-indexed, end is exclusive)
     months_html = "".join(
-        f'<span style="grid-column:{col + 1}">{lbl}</span>'
-        for col, lbl in month_labels
+        f'<span style="grid-column:{s + 1}/{e + 2}">{lbl}</span>'
+        for s, e, lbl in month_ranges
     )
 
     return {
         "cells_html": "".join(cells_html),
         "months_html": months_html,
         "grid_start": grid_start,
+        "num_cols": num_cols,
     }
 
 
@@ -163,22 +198,35 @@ def _build_heatmap(today: date, days: dict) -> dict:
 
 _CSS = r"""
 :root {
-  --bg: #0e0e10;
-  --bg-lift: #15151a;
-  --ink: #ece5d1;
-  --ink-strong: #f5efde;
-  --ink-dim: #8a8472;
-  --ink-dimmer: #55524a;
-  --rule: #24242a;
-  --amber: #e89d3c;
-  --sage: #8db37e;
-  --terra: #c96a54;
-  --gold: #d4a84b;
-  --cell-0: #1c1c21;
-  --cell-1: #2c3a2b;
-  --cell-2: #456343;
-  --cell-3: #6c9566;
-  --cell-4: #9cc393;
+  --bg: #09090B;
+  --bg-lift: rgba(255, 255, 255, 0.03);
+  --bg-card: rgba(18, 18, 20, 0.72);
+
+  --border: rgba(255, 255, 255, 0.07);
+  --border-light: rgba(255, 255, 255, 0.14);
+
+  /* Zinc palette */
+  --ink: #A1A1AA;       /* zinc-400 */
+  --ink-strong: #F4F4F5; /* zinc-100 */
+  --ink-dim: #52525B;   /* zinc-600 */
+
+  /* Orange accent */
+  --accent: #F97316;              /* orange-500 */
+  --accent-dark: #C2410C;         /* orange-700 */
+  --accent-glow: rgba(249, 115, 22, 0.25);
+  --accent-subtle: rgba(249, 115, 22, 0.08);
+
+  --sage: #10B981;
+  --amber: #F59E0B;
+  --terra: #EF4444;
+  --gold: #FBBF24;
+
+  /* Heatmap cells — orange tinted levels */
+  --cell-0: #2a2a2a;
+  --cell-1: rgba(249, 115, 22, 0.18);
+  --cell-2: rgba(249, 115, 22, 0.42);
+  --cell-3: rgba(249, 115, 22, 0.70);
+  --cell-4: #F97316;
 }
 
 * { box-sizing: border-box; }
@@ -187,14 +235,18 @@ html { background: var(--bg); }
 body {
   margin: 0;
   min-height: 100vh;
-  background: var(--bg);
+  background-color: var(--bg);
+  background-image:
+    radial-gradient(ellipse at 50% -10%, rgba(249, 115, 22, 0.12), transparent 55%),
+    linear-gradient(to right, rgba(255, 255, 255, 0.03) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.03) 1px, transparent 1px);
+  background-size: 100% 100%, 40px 40px, 40px 40px;
+  background-position: center 0, center center, center center;
   color: var(--ink);
-  font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace;
-  font-size: 13px;
-  line-height: 1.55;
-  font-feature-settings: "ss01", "cv01";
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  font-size: 14px;
+  line-height: 1.6;
   -webkit-font-smoothing: antialiased;
-  letter-spacing: 0.01em;
   position: relative;
   overflow-x: hidden;
 }
@@ -204,14 +256,14 @@ body {
   inset: -50%;
   pointer-events: none;
   z-index: 0;
-  opacity: 0.05;
+  opacity: 0.04;
   mix-blend-mode: screen;
 }
 
 main {
-  max-width: 1200px;
+  max-width: 1040px;
   margin: 0 auto;
-  padding: 72px 56px 96px;
+  padding: 80px 40px 120px;
   position: relative;
   z-index: 1;
 }
@@ -219,322 +271,523 @@ main {
 /* ---------- header ---------- */
 
 header.masthead {
-  margin-bottom: 96px;
+  margin-bottom: 72px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  align-items: center;
+  text-align: center;
 }
 
 .eyebrow {
-  display: flex;
-  gap: 18px;
+  display: inline-flex;
   align-items: center;
-  font-size: 10.5px;
-  letter-spacing: 0.35em;
-  text-transform: uppercase;
-  color: var(--ink-dim);
-  margin-bottom: 80px;
+  gap: 8px;
+  padding: 6px 14px;
+  background: rgba(255,255,255,0.02);
+  border: 1px solid var(--border);
+  border-radius: 100px;
+  font-family: 'Inter', sans-serif;
+  font-size: 12px;
+  color: var(--ink);
+  font-weight: 500;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.05);
+  transition: all 0.3s ease;
 }
+
+.eyebrow:hover {
+  background: rgba(255,255,255,0.04);
+  border-color: var(--border-light);
+}
+
 .eyebrow .dot {
   width: 6px; height: 6px; border-radius: 50%;
-  background: var(--amber);
-  box-shadow: 0 0 10px var(--amber);
+  background: var(--accent);
+  box-shadow: 0 0 10px var(--accent-glow);
+  animation: pulse 2s infinite;
 }
-.eyebrow .rule {
-  flex: 1;
-  height: 1px;
-  background: var(--rule);
+
+@keyframes pulse {
+  0% { box-shadow: 0 0 0 0 var(--accent-glow); }
+  70% { box-shadow: 0 0 0 8px transparent; }
+  100% { box-shadow: 0 0 0 0 transparent; }
 }
 
 h1.display {
-  font-family: 'Fraunces', 'Times New Roman', serif;
-  font-weight: 300;
-  font-size: clamp(56px, 9vw, 128px);
-  line-height: 0.9;
-  letter-spacing: -0.035em;
+  font-family: 'Outfit', sans-serif;
+  font-weight: 600;
+  font-size: clamp(40px, 6vw, 56px);
+  line-height: 1.1;
+  letter-spacing: -0.03em;
   margin: 0;
   color: var(--ink-strong);
-  font-variation-settings: "opsz" 144, "SOFT" 30;
 }
 h1.display em {
-  font-style: italic;
-  font-weight: 900;
-  color: var(--amber);
-  font-variation-settings: "opsz" 144, "SOFT" 50;
+  font-style: normal;
+  color: transparent;
+  background: linear-gradient(135deg, #ffffff 0%, #71717A 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
 }
 
 .subhead {
   display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  margin-top: 56px;
-  padding-top: 20px;
-  border-top: 1px solid var(--rule);
-  font-size: 11px;
-  letter-spacing: 0.2em;
-  text-transform: uppercase;
+  gap: 16px;
+  margin-top: 8px;
+  font-size: 14px;
+  color: var(--ink);
+}
+.subhead span {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.subhead span:not(:last-child)::after {
+  content: "•";
   color: var(--ink-dim);
 }
 .subhead em {
   font-style: normal;
   color: var(--ink-strong);
+  font-weight: 500;
+}
+
+/* ---------- bento grid ---------- */
+
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: repeat(12, 1fr);
+  gap: 24px;
+  margin-bottom: 24px;
+}
+
+.card {
+  background: var(--bg-card);
+  backdrop-filter: blur(40px);
+  -webkit-backdrop-filter: blur(40px);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 32px;
+  position: relative;
+  overflow: hidden;
+  box-shadow: 
+    0 12px 32px -12px rgba(0,0,0,0.8),
+    inset 0 1px 1px rgba(255,255,255,0.06);
+  transition: all 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.card:hover {
+  transform: translateY(-4px);
+  border-color: var(--border-light);
+  box-shadow: 
+    0 24px 48px -12px rgba(0,0,0,1),
+    inset 0 1px 1px rgba(255,255,255,0.1);
+}
+
+.card::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0; height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.3), transparent);
+  opacity: 0;
+  transition: opacity 0.4s ease;
+}
+
+.card:hover::before {
+  opacity: 1;
 }
 
 /* ---------- hero stats ---------- */
 
-.hero {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  margin: 0 0 120px;
-  border-top: 1px solid var(--rule);
-  border-bottom: 1px solid var(--rule);
-}
-.stat {
-  padding: 48px 40px 40px;
+.stat-card {
+  grid-column: span 4;
   display: flex;
   flex-direction: column;
-  gap: 20px;
-  position: relative;
 }
-.stat + .stat {
-  border-left: 1px solid var(--rule);
+
+@media (max-width: 900px) {
+  .stat-card { grid-column: span 12; }
 }
+
+.stat-icon {
+  width: 44px; height: 44px;
+  border-radius: 12px;
+  background: var(--accent-subtle);
+  border: 1px solid rgba(249, 115, 22, 0.2);
+  box-shadow: inset 0 1px 1px rgba(255,255,255,0.05);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 32px;
+  color: var(--accent);
+  transition: all 0.4s ease;
+}
+
+.stat-card:hover .stat-icon {
+  transform: scale(1.05);
+  background: rgba(255,255,255,0.05);
+  border-color: var(--border-light);
+}
+
+.stat-icon.emerald { color: var(--sage); }
+.stat-icon.amber { color: var(--amber); }
+
+.stat-icon svg {
+  width: 20px; height: 20px;
+  filter: drop-shadow(0 2px 4px rgba(0,0,0,0.2));
+}
+
 .stat-num {
-  font-family: 'Fraunces', serif;
-  font-weight: 300;
-  font-size: clamp(68px, 9vw, 128px);
-  line-height: 0.88;
-  letter-spacing: -0.045em;
+  font-family: 'Outfit', sans-serif;
+  font-weight: 500;
+  font-size: clamp(32px, 4vw, 48px);
+  line-height: 1;
+  letter-spacing: -0.02em;
   color: var(--ink-strong);
-  font-variation-settings: "opsz" 144;
-  font-feature-settings: "lnum", "tnum";
   display: flex;
   align-items: baseline;
-  gap: 10px;
+  gap: 8px;
+  margin-bottom: 12px;
 }
+
 .stat-num .unit {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 12px;
-  font-weight: 400;
-  color: var(--ink-dim);
-  letter-spacing: 0.15em;
-  text-transform: uppercase;
-  font-variation-settings: normal;
+  font-family: 'Inter', sans-serif;
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--ink);
 }
+
 .stat-num .denom {
-  font-family: 'Fraunces', serif;
-  font-size: 0.55em;
+  font-family: 'Inter', sans-serif;
+  font-size: 0.5em;
   color: var(--ink-dim);
-  font-weight: 300;
-  font-style: italic;
+  font-weight: 400;
 }
-.stat-kicker {
-  width: 36px;
-  height: 2px;
-  background: var(--amber);
-}
+
 .stat-label {
-  font-size: 10.5px;
-  letter-spacing: 0.28em;
-  text-transform: uppercase;
-  color: var(--ink-dim);
-}
-.stat-sub {
-  font-size: 11px;
-  color: var(--ink-dimmer);
-  letter-spacing: 0.1em;
-  margin-top: -8px;
-}
-
-/* ---------- section heading ---------- */
-
-.section-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  padding-bottom: 24px;
-  border-bottom: 1px solid var(--rule);
-  margin-bottom: 40px;
-}
-.section-head h2 {
-  font-family: 'Fraunces', serif;
-  font-style: italic;
-  font-weight: 300;
-  font-size: 32px;
-  letter-spacing: -0.015em;
-  margin: 0;
+  font-family: 'Inter', sans-serif;
+  font-size: 15px;
+  font-weight: 500;
   color: var(--ink-strong);
-  font-variation-settings: "opsz" 144;
+  margin-bottom: 4px;
 }
-.section-head .meta {
-  font-size: 10.5px;
-  letter-spacing: 0.28em;
-  text-transform: uppercase;
-  color: var(--ink-dim);
+
+.stat-sub {
+  font-size: 13px;
+  color: var(--ink);
 }
 
 /* ---------- heatmap ---------- */
 
-section.heatmap {
-  margin: 0 0 120px;
+.heatmap-card {
+  grid-column: span 12;
+  padding: 40px;
 }
+
+.section-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  margin-bottom: 32px;
+}
+
+.section-head-left {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.section-head h2 {
+  font-family: 'Outfit', sans-serif;
+  font-weight: 500;
+  font-size: 20px;
+  letter-spacing: -0.01em;
+  margin: 0;
+  color: var(--ink-strong);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.section-head .meta {
+  font-family: 'Inter', sans-serif;
+  font-size: 13px;
+  color: var(--ink);
+}
+
 .heatmap-frame {
   overflow-x: auto;
-  padding-bottom: 4px;
+  padding-bottom: 8px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255,255,255,0.12) transparent;
 }
+.heatmap-frame::-webkit-scrollbar {
+  height: 3px;
+}
+.heatmap-frame::-webkit-scrollbar-track {
+  background: transparent;
+}
+.heatmap-frame::-webkit-scrollbar-thumb {
+  background: rgba(255,255,255,0.12);
+  border-radius: 3px;
+}
+
 .heatmap-inner {
-  display: inline-grid;
-  grid-template-rows: auto auto;
-  row-gap: 10px;
+  display: inline-flex;
+  gap: 6px;
+}
+.heatmap-day-labels {
+  display: grid;
+  grid-template-rows: repeat(7, 16px);
+  row-gap: 3px;
+  font-family: 'Inter', sans-serif;
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--ink-dim);
+  align-items: center;
+  padding-bottom: 22px; /* matches months row height below */
+}
+.heatmap-day-labels span {
+  line-height: 16px;
+  white-space: nowrap;
+}
+.heatmap-cols {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 6px;
 }
 .heatmap-months {
   display: grid;
-  grid-template-columns: repeat(53, 14px);
+  grid-template-columns: repeat(53, 16px);
   column-gap: 3px;
-  font-size: 10px;
-  letter-spacing: 0.2em;
-  text-transform: uppercase;
+  font-family: 'Inter', sans-serif;
+  font-size: 11px;
+  font-weight: 400;
   color: var(--ink-dim);
-  height: 14px;
 }
 .heatmap-months span {
   white-space: nowrap;
+  text-align: center;
 }
 .heatmap-grid {
   display: grid;
-  grid-template-columns: repeat(53, 14px);
-  grid-template-rows: repeat(7, 14px);
+  grid-template-columns: repeat(53, 16px);
+  grid-template-rows: repeat(7, 16px);
   column-gap: 3px;
   row-gap: 3px;
 }
 
 .cell {
   background: var(--cell-0);
-  border-radius: 2px;
+  border-radius: 3px;
   position: relative;
-  animation: cellIn 480ms cubic-bezier(0.16, 0.8, 0.24, 1) both;
+  cursor: pointer;
+  transition: transform 0.15s cubic-bezier(0.16, 1, 0.3, 1),
+              box-shadow 0.15s ease;
+  animation: cellIn 800ms cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 .cell-future {
-  background: transparent;
-  border: 1px dashed var(--rule);
+  background: var(--cell-0);
+  cursor: default;
 }
 .cell[data-level="1"] { background: var(--cell-1); }
-.cell[data-level="2"] { background: var(--cell-2); }
-.cell[data-level="3"] { background: var(--cell-3); }
-.cell[data-level="4"] { background: var(--cell-4); box-shadow: 0 0 8px rgba(156, 195, 147, 0.4); }
-
-.cell:hover {
-  outline: 1px solid var(--amber);
-  outline-offset: 1px;
-  z-index: 5;
+.cell[data-level="2"] { background: var(--cell-2); box-shadow: inset 0 1px 0 rgba(255,255,255,0.1); }
+.cell[data-level="3"] { background: var(--cell-3); box-shadow: inset 0 1px 0 rgba(255,255,255,0.2); }
+.cell[data-level="4"] {
+  background: var(--cell-4);
+  box-shadow: 0 0 10px var(--accent-glow), inset 0 1px 0 rgba(255,255,255,0.35);
 }
-.cell[data-label]:hover::after {
-  content: attr(data-label);
-  position: absolute;
-  bottom: calc(100% + 10px);
-  left: 50%;
-  transform: translateX(-50%);
-  background: var(--bg-lift);
-  color: var(--ink);
-  padding: 8px 12px;
-  font-size: 10.5px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  white-space: nowrap;
-  border: 1px solid var(--rule);
-  border-radius: 2px;
+
+.cell:not(.cell-future):hover {
+  transform: scale(1.6);
+  z-index: 20;
+  outline: 1.5px solid rgba(249, 115, 22, 0.8);
+  outline-offset: 0;
+}
+
+/* ---------- JS-driven floating tooltip ---------- */
+#hm-tip {
+  position: fixed;
+  z-index: 9999;
   pointer-events: none;
-  z-index: 10;
+  background: rgba(24, 24, 27, 0.95);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  padding: 7px 13px;
+  font-family: 'Inter', sans-serif;
+  font-size: 12px;
+  font-weight: 500;
+  color: #F4F4F5;
+  white-space: nowrap;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6), 0 2px 8px rgba(0, 0, 0, 0.4);
+  opacity: 0;
+  transform: translateY(4px);
+  transition: opacity 0.12s ease, transform 0.12s ease;
+  /* caret — a small orange dot on the bottom */
+}
+#hm-tip.visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+#hm-tip .tip-count {
+  color: var(--accent);
+  font-weight: 600;
+  margin-left: 5px;
 }
 
-.heatmap-legend {
-  margin-top: 28px;
+/* ---------- heatmap header (LeetCode style) ---------- */
+
+.heatmap-top {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  font-size: 10px;
-  letter-spacing: 0.28em;
-  text-transform: uppercase;
-  color: var(--ink-dim);
+  margin-bottom: 24px;
+  flex-wrap: wrap;
+  gap: 12px;
 }
-.legend-scale { display: flex; gap: 3px; align-items: center; }
-.legend-scale .cell {
-  width: 14px; height: 14px; animation: none;
+
+.heatmap-top-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 15px;
+  color: var(--ink-strong);
+}
+
+.heatmap-submissions-count {
+  font-family: 'Outfit', sans-serif;
+  font-weight: 700;
+  font-size: 22px;
+  color: var(--ink-strong);
+}
+
+.heatmap-info-icon {
+  font-size: 13px;
+  color: var(--ink-dim);
+  cursor: default;
+  user-select: none;
+}
+
+.heatmap-top-right {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  font-size: 14px;
+  color: var(--ink);
+}
+
+.heatmap-stat strong {
+  color: var(--ink-strong);
+  font-weight: 600;
+}
+
+.heatmap-current-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  font-family: 'Inter', sans-serif;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--ink-strong);
+  cursor: pointer;
+  transition: background 0.2s ease, border-color 0.2s ease;
+}
+.heatmap-current-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.2);
+}
+.heatmap-current-btn .chevron {
+  font-size: 10px;
+  opacity: 0.7;
 }
 
 /* ---------- two column section ---------- */
 
-section.columns {
-  display: grid;
-  grid-template-columns: 0.9fr 1.1fr;
-  gap: 80px;
-  margin-bottom: 96px;
+.diff-card {
+  grid-column: span 5;
 }
-@media (max-width: 860px) {
-  section.columns { grid-template-columns: 1fr; gap: 48px; }
+
+.log-card {
+  grid-column: span 7;
+}
+
+@media (max-width: 900px) {
+  .diff-card, .log-card { grid-column: span 12; }
 }
 
 .diff-list {
   display: flex;
   flex-direction: column;
+  gap: 28px;
 }
 .diff-row {
-  display: grid;
-  grid-template-columns: 84px 1fr 72px;
-  gap: 20px;
-  align-items: center;
-  padding: 20px 0;
-  border-bottom: 1px solid var(--rule);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
-.diff-row:last-child { border-bottom: none; }
+.diff-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
 .diff-label {
-  font-size: 10.5px;
-  letter-spacing: 0.28em;
-  text-transform: uppercase;
-  color: var(--ink);
+  font-family: 'Inter', sans-serif;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--ink-strong);
   display: flex;
   gap: 10px;
   align-items: center;
 }
 .diff-label::before {
   content: "";
-  width: 6px; height: 6px; border-radius: 50%;
+  width: 8px; height: 8px; border-radius: 50%;
   background: currentColor;
+  box-shadow: 0 0 12px currentColor;
 }
 .diff-row[data-diff="easy"] .diff-label { color: var(--sage); }
 .diff-row[data-diff="medium"] .diff-label { color: var(--amber); }
 .diff-row[data-diff="hard"] .diff-label { color: var(--terra); }
 
 .bar-track {
-  height: 3px;
-  background: var(--cell-0);
+  height: 6px;
+  background: rgba(255,255,255,0.03);
+  border-radius: 100px;
   position: relative;
   overflow: hidden;
+  box-shadow: inset 0 1px 2px rgba(0,0,0,0.5);
 }
 .bar-fill {
   position: absolute;
   inset: 0 auto 0 0;
-  background: var(--amber);
+  border-radius: 100px;
   transform-origin: left;
-  animation: barIn 900ms cubic-bezier(0.18, 0.78, 0.25, 1) both;
+  animation: barIn 1s cubic-bezier(0.16, 1, 0.3, 1) both;
+  box-shadow: inset 0 1px 1px rgba(255,255,255,0.4);
 }
-.diff-row[data-diff="easy"] .bar-fill { background: var(--sage); }
-.diff-row[data-diff="medium"] .bar-fill { background: var(--amber); }
-.diff-row[data-diff="hard"] .bar-fill { background: var(--terra); }
+.diff-row[data-diff="easy"] .bar-fill { background: var(--sage); box-shadow: inset 0 1px 1px rgba(255,255,255,0.4), 0 0 16px rgba(16, 185, 129, 0.4); }
+.diff-row[data-diff="medium"] .bar-fill { background: var(--amber); box-shadow: inset 0 1px 1px rgba(255,255,255,0.4), 0 0 16px rgba(245, 158, 11, 0.4); }
+.diff-row[data-diff="hard"] .bar-fill { background: var(--terra); box-shadow: inset 0 1px 1px rgba(255,255,255,0.4), 0 0 16px rgba(239, 68, 68, 0.4); }
 
 .diff-count {
-  font-family: 'Fraunces', serif;
-  font-size: 20px;
+  font-family: 'Inter', sans-serif;
+  font-size: 14px;
+  font-weight: 500;
   color: var(--ink-strong);
-  text-align: right;
-  font-variation-settings: "opsz" 144;
-  font-feature-settings: "tnum";
 }
 .diff-count .slash {
-  color: var(--ink-dimmer);
-  font-style: italic;
+  color: var(--ink-dim);
+  font-weight: 400;
   margin: 0 2px;
 }
 .diff-count .tot {
-  color: var(--ink-dim);
-  font-size: 14px;
+  color: var(--ink);
 }
 
 /* ---------- log ---------- */
@@ -543,61 +796,85 @@ section.columns {
   list-style: none;
   margin: 0;
   padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 .log li {
   display: grid;
-  grid-template-columns: 36px 1fr auto;
-  gap: 20px;
-  align-items: baseline;
-  padding: 18px 0;
-  border-bottom: 1px solid var(--rule);
+  grid-template-columns: 44px 1fr auto;
+  gap: 16px;
+  align-items: center;
+  padding: 12px 16px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  transition: all 0.3s ease;
 }
-.log li:last-child { border-bottom: none; }
+.log li:hover {
+  background: rgba(255,255,255,0.02);
+  border-color: var(--border);
+}
 .log .mark {
-  font-family: 'Fraunces', serif;
-  font-size: 22px;
-  line-height: 1;
-  text-align: center;
-  font-variation-settings: "opsz" 144;
+  width: 44px; height: 44px;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 600;
+  font-size: 16px;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.05);
 }
-.log .outcome-y .mark { color: var(--sage); }
-.log .outcome-n .mark { color: var(--terra); }
-.log .outcome-e .mark { color: var(--gold); }
-.log .outcome-skip .mark { color: var(--ink-dim); }
+.log .outcome-y .mark { background: rgba(16, 185, 129, 0.1); color: var(--sage); border: 1px solid rgba(16, 185, 129, 0.2); }
+.log .outcome-n .mark { background: rgba(239, 68, 68, 0.1); color: var(--terra); border: 1px solid rgba(239, 68, 68, 0.2); }
+.log .outcome-e .mark { background: rgba(251, 191, 36, 0.1); color: var(--gold); border: 1px solid rgba(251, 191, 36, 0.2); }
+.log .outcome-skip .mark { background: rgba(255, 255, 255, 0.03); color: var(--ink); border: 1px solid rgba(255, 255, 255, 0.08); }
+
+.log-content {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
 .log .title {
+  font-family: 'Inter', sans-serif;
   color: var(--ink-strong);
-  font-size: 13.5px;
+  font-size: 14px;
+  font-weight: 500;
 }
 .log .row-meta {
   display: flex;
   gap: 12px;
-  font-size: 10.5px;
-  letter-spacing: 0.18em;
-  text-transform: uppercase;
-  color: var(--ink-dim);
-  align-items: baseline;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ink);
+  align-items: center;
 }
-.row-meta .diff-tag { color: var(--ink); }
+.row-meta .diff-tag { 
+  font-size: 12px;
+  font-weight: 500;
+}
 .row-meta .diff-tag[data-diff="Easy"] { color: var(--sage); }
 .row-meta .diff-tag[data-diff="Medium"] { color: var(--amber); }
 .row-meta .diff-tag[data-diff="Hard"] { color: var(--terra); }
 .row-meta .interval {
-  font-family: 'Fraunces', serif;
+  font-family: 'Inter', sans-serif;
+  color: var(--ink-dim);
+}
+.log-time {
   font-size: 13px;
-  letter-spacing: normal;
-  text-transform: none;
-  color: var(--ink);
-  font-style: italic;
-  font-variation-settings: "opsz" 14;
+  color: var(--ink-dim);
+  font-weight: 400;
 }
 
 .log .empty {
-  padding: 40px 0;
-  color: var(--ink-dim);
+  padding: 40px;
+  color: var(--ink);
   text-align: center;
-  font-style: italic;
-  font-family: 'Fraunces', serif;
-  font-size: 16px;
+  font-weight: 500;
+  background: transparent;
+  border: 1px dashed var(--border);
+  border-radius: 12px;
 }
 
 /* ---------- ending ---------- */
@@ -607,49 +884,53 @@ footer.colophon {
   justify-content: space-between;
   align-items: center;
   padding-top: 32px;
-  border-top: 1px solid var(--rule);
-  font-size: 10.5px;
-  letter-spacing: 0.35em;
-  text-transform: uppercase;
+  margin-top: 32px;
+  border-top: 1px solid var(--border);
+  font-size: 13px;
   color: var(--ink-dim);
 }
-.colophon .mark-fraunces {
-  font-family: 'Fraunces', serif;
-  font-style: italic;
-  font-size: 18px;
+.colophon .mark-brand {
+  font-family: 'Outfit', sans-serif;
+  font-weight: 500;
+  font-size: 14px;
+  color: var(--ink);
   letter-spacing: -0.01em;
-  text-transform: none;
-  color: var(--amber);
-  font-weight: 300;
 }
 
 /* ---------- animations ---------- */
 
 @keyframes cellIn {
-  from { opacity: 0; transform: translateY(3px) scale(0.5); }
-  to { opacity: 1; transform: none; }
+  from { opacity: 0; transform: scale(0.5); }
+  to { opacity: 1; transform: scale(1); }
 }
 @keyframes barIn {
   from { transform: scaleX(0); }
   to { transform: scaleX(1); }
 }
 @keyframes revealUp {
-  from { opacity: 0; transform: translateY(14px); }
+  from { opacity: 0; transform: translateY(32px); }
   to { opacity: 1; transform: none; }
 }
 
-.masthead, .hero, .heatmap, .columns, footer.colophon {
-  animation: revealUp 720ms cubic-bezier(0.22, 0.8, 0.3, 1) both;
-}
-.masthead { animation-delay: 0ms; }
-.hero { animation-delay: 120ms; }
-.heatmap { animation-delay: 220ms; }
-.columns { animation-delay: 320ms; }
-footer.colophon { animation-delay: 420ms; }
+.masthead { animation: revealUp 1s cubic-bezier(0.16, 1, 0.3, 1) both; }
+.card { animation: revealUp 1s cubic-bezier(0.16, 1, 0.3, 1) both; }
 
-/* Streak number gets a gentle amber glow if non-zero. */
-.stat.is-streak.has-streak .stat-num {
-  text-shadow: 0 0 36px rgba(232, 157, 60, 0.25);
+.stat-card:nth-child(1) { animation-delay: 0.1s; }
+.stat-card:nth-child(2) { animation-delay: 0.2s; }
+.stat-card:nth-child(3) { animation-delay: 0.3s; }
+.heatmap-card { animation-delay: 0.4s; }
+.diff-card { animation-delay: 0.5s; }
+.log-card { animation-delay: 0.6s; }
+
+/* Streak glow — uses orange accent */
+.stat-card.is-streak.has-streak .stat-icon {
+  background: rgba(249, 115, 22, 0.12);
+  border-color: rgba(249, 115, 22, 0.35);
+  color: var(--accent);
+  box-shadow: 0 0 20px rgba(249, 115, 22, 0.2), inset 0 1px 1px rgba(255,255,255,0.08);
+}
+.stat-card.is-streak.has-streak .stat-num {
+  color: var(--accent);
 }
 """
 
@@ -678,14 +959,73 @@ def _fmt_recent_row(r: dict) -> str:
         interval_txt = f"{r['interval_before']}d → {r['interval_after']}d"
     return (
         f'<li class="outcome-{outcome}">'
-        f'<span class="mark">{mark}</span>'
-        f'<span class="title">{_html.escape(r["title"])}</span>'
-        f'<span class="row-meta">'
+        f'<div class="mark">{mark}</div>'
+        f'<div class="log-content">'
+        f'<div class="title">{_html.escape(r["title"])}</div>'
+        f'<div class="row-meta">'
         f'<span class="diff-tag" data-diff="{r["difficulty"]}">{r["difficulty"]}</span>'
         f'<span class="interval">{interval_txt}</span>'
-        f'<span>{when}</span>'
-        f'</span></li>'
+        f'</div>'
+        f'</div>'
+        f'<div class="log-time">{when}</div>'
+        f'</li>'
     )
+
+
+_HM_JS = r"""
+(function () {
+  var tip = document.getElementById('hm-tip');
+  var hideTimer = null;
+
+  function showTip(cell, e) {
+    var label = cell.dataset.label;
+    if (!label || cell.classList.contains('cell-future')) return;
+    // label format: "Mon Apr 27, 2026 \u2014 3 reviews"
+    var idx = label.indexOf(' \u2014 ');
+    var dateStr = idx >= 0 ? label.slice(0, idx) : label;
+    var countStr = idx >= 0 ? label.slice(idx + 3) : '';
+    tip.innerHTML = dateStr +
+      (countStr ? '<span class="tip-count">' + countStr + '</span>' : '');
+    clearTimeout(hideTimer);
+    positionTip(e);
+    tip.classList.add('visible');
+  }
+
+  function positionTip(e) {
+    var pad = 14;
+    var tw = tip.offsetWidth;
+    var th = tip.offsetHeight;
+    var x = e.clientX - tw / 2;
+    var y = e.clientY - th - pad;
+    if (x < 8) x = 8;
+    if (x + tw > window.innerWidth - 8) x = window.innerWidth - 8 - tw;
+    if (y < 8) y = e.clientY + pad;
+    tip.style.left = x + 'px';
+    tip.style.top  = y + 'px';
+  }
+
+  function hideTip() {
+    hideTimer = setTimeout(function () {
+      tip.classList.remove('visible');
+    }, 60);
+  }
+
+  document.querySelectorAll('.heatmap-grid').forEach(function (grid) {
+    grid.addEventListener('mouseover', function (e) {
+      var cell = e.target.closest('.cell');
+      if (cell) showTip(cell, e);
+    });
+    grid.addEventListener('mousemove', function (e) {
+      var cell = e.target.closest('.cell');
+      if (cell && tip.classList.contains('visible')) positionTip(e);
+    });
+    grid.addEventListener('mouseleave', hideTip);
+    grid.addEventListener('mouseout', function (e) {
+      if (!e.target.closest('.cell')) hideTip();
+    });
+  });
+})();
+"""
 
 
 def render_html(data: dict) -> str:
@@ -706,22 +1046,28 @@ def render_html(data: dict) -> str:
     # Hero
     has_streak_cls = " has-streak" if streak > 0 else ""
     hero_html = f'''
-      <div class="stat is-streak{has_streak_cls}">
+      <div class="card stat-card is-streak{has_streak_cls}">
+        <div class="stat-icon amber">
+          <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 2.5z"/></svg>
+        </div>
+        <div class="stat-label">Current Streak</div>
         <div class="stat-num">{streak}<span class="unit">days</span></div>
-        <div class="stat-kicker"></div>
-        <div class="stat-label">current streak</div>
         <div class="stat-sub">consecutive days practiced</div>
       </div>
-      <div class="stat">
+      <div class="card stat-card">
+        <div class="stat-icon emerald">
+          <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+        </div>
+        <div class="stat-label">Problems Attempted</div>
         <div class="stat-num">{attempted}<span class="denom">/ {total}</span></div>
-        <div class="stat-kicker"></div>
-        <div class="stat-label">problems attempted</div>
         <div class="stat-sub">of the neetcode two-fifty</div>
       </div>
-      <div class="stat">
+      <div class="card stat-card">
+        <div class="stat-icon">
+          <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+        </div>
+        <div class="stat-label">Total Sessions</div>
         <div class="stat-num">{total_reviews}<span class="unit">reviews</span></div>
-        <div class="stat-kicker"></div>
-        <div class="stat-label">total sessions</div>
         <div class="stat-sub">answers recorded in the log</div>
       </div>
     '''
@@ -735,9 +1081,11 @@ def render_html(data: dict) -> str:
         pct = (seen / tot * 100) if tot else 0
         diff_rows.append(f'''
           <div class="diff-row" data-diff="{d.lower()}">
-            <span class="diff-label">{d}</span>
+            <div class="diff-header">
+              <span class="diff-label">{d}</span>
+              <span class="diff-count">{seen}<span class="slash"> / </span><span class="tot">{tot}</span></span>
+            </div>
             <div class="bar-track"><div class="bar-fill" style="width:{pct:.1f}%"></div></div>
-            <span class="diff-count">{seen}<span class="slash"> / </span><span class="tot">{tot}</span></span>
           </div>
         ''')
 
@@ -745,24 +1093,12 @@ def render_html(data: dict) -> str:
     if data["recent"]:
         recent_html = "<ol class='log'>" + "".join(_fmt_recent_row(r) for r in data["recent"]) + "</ol>"
     else:
-        recent_html = '<ol class="log"><li class="empty">no entries yet. open a card — your first mark goes here.</li></ol>'
+        recent_html = '<ol class="log"><li class="empty">No entries yet. Open a card — your first mark goes here.</li></ol>'
 
-    # Legend cells
-    legend_html = (
-        '<span>less</span>'
-        '<span class="legend-scale">'
-        '<div class="cell" data-level="0"></div>'
-        '<div class="cell" data-level="1"></div>'
-        '<div class="cell" data-level="2"></div>'
-        '<div class="cell" data-level="3"></div>'
-        '<div class="cell" data-level="4"></div>'
-        '</span>'
-        '<span>more</span>'
-    )
+    submissions_past_year = data["submissions_past_year"]
+    active_days_past_year = data["active_days_past_year"]
+    max_streak_past_year = data["max_streak_past_year"]
 
-    year = today.strftime("%Y")
-    grid_start_year = hm["grid_start"].strftime("%Y")
-    year_span = f'{grid_start_year} — {year}' if grid_start_year != year else year
     generated_stamp = today.strftime("%b %-d, %Y").upper()
 
     last_at = data.get("last_reviewed_at")
@@ -779,7 +1115,7 @@ def render_html(data: dict) -> str:
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght,SOFT@0,9..144,300..900,30..100;1,9..144,300..900,30..100&family=JetBrains+Mono:wght@300;400;500;600&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Outfit:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
   <style>{_CSS}</style>
 </head>
 <body>
@@ -790,63 +1126,69 @@ def render_html(data: dict) -> str:
       <div class="eyebrow">
         <span class="dot"></span>
         <span>Logbook · NeetCode 250</span>
-        <span class="rule"></span>
-        <span>No. 01</span>
       </div>
-      <h1 class="display">a record of<br><em>daily practice.</em></h1>
+      <h1 class="display">Daily <em>Practice</em> Record</h1>
       <div class="subhead">
         <span>Generated <em>{generated_stamp}</em>{last_note}</span>
         <span>{subhead_right}</span>
       </div>
     </header>
 
-    <section class="hero">
+    <div class="dashboard-grid">
       {hero_html}
-    </section>
 
-    <section class="heatmap">
-      <div class="section-head">
-        <h2>Daily activity</h2>
-        <span class="meta">Year in view · {year_span}</span>
-      </div>
-      <div class="heatmap-frame">
-        <div class="heatmap-inner">
-          <div class="heatmap-months">{hm["months_html"]}</div>
-          <div class="heatmap-grid">{hm["cells_html"]}</div>
+      <div class="card heatmap-card">
+        <div class="heatmap-top">
+          <div class="heatmap-top-left">
+            <span class="heatmap-submissions-count">{submissions_past_year}</span>
+            <span>submissions in the past one year</span>
+            <span class="heatmap-info-icon" title="Total reviews completed in the past 52 weeks">&#9432;</span>
+          </div>
+          <div class="heatmap-top-right">
+            <span class="heatmap-stat">Total active days: <strong>{active_days_past_year}</strong></span>
+            <span class="heatmap-stat">Max streak: <strong>{max_streak_past_year}</strong></span>
+            <button class="heatmap-current-btn">Current <span class="chevron">&#9660;</span></button>
+          </div>
+        </div>
+        <div class="heatmap-frame">
+          <div class="heatmap-cols">
+            <div class="heatmap-grid" style="grid-template-columns:repeat({hm['num_cols']},16px)">{hm["cells_html"]}</div>
+            <div class="heatmap-months" style="grid-template-columns:repeat({hm['num_cols']},16px)">{hm["months_html"]}</div>
+          </div>
         </div>
       </div>
-      <div class="heatmap-legend">
-        <span>reviews per day</span>
-        <span class="legend-scale-wrap">{legend_html}</span>
-      </div>
-    </section>
 
-    <section class="columns">
-      <article>
+      <div class="card diff-card">
         <div class="section-head">
-          <h2>By difficulty</h2>
+          <h2>By Difficulty</h2>
           <span class="meta">Coverage</span>
         </div>
         <div class="diff-list">
           {''.join(diff_rows)}
         </div>
-      </article>
-      <article>
+      </div>
+
+      <div class="card log-card">
         <div class="section-head">
-          <h2>Recent log</h2>
+          <h2>Recent Log</h2>
           <span class="meta">Latest 25 entries</span>
         </div>
         {recent_html}
-      </article>
-    </section>
+      </div>
+    </div>
 
     <footer class="colophon">
       <span>— end of record</span>
-      <span class="mark-fraunces">neetcode srs</span>
+      <span class="mark-brand">neetcode srs</span>
       <span>{generated_stamp}</span>
     </footer>
 
   </main>
+
+  <!-- Heatmap floating tooltip -->
+  <div id="hm-tip"></div>
+
+  <script>{_HM_JS}</script>
 </body>
 </html>
 '''

@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -c \"import webbrowser; print\\(webbrowser.get\\(\\).__class__.__name__\\)\")",
+      "Bash(python3 *)",
+      "Bash(neetcode open *)"
+    ]
+  }
+}
