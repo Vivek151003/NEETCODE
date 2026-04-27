@@ -6,3 +6,4 @@ data/state.db
 data/state.db-journal
 data/config.json
 .gstack/
+.venv2/
